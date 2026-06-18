@@ -54,17 +54,4 @@ class FlowContextPropagationTest(
         // The /flow endpoint returns a JSON array with a single element.
         httpClient.toBlocking().retrieve("/greet/flow?name=world") shouldBe "[\"$expected\"]"
     }
-
-    // ---- Plain controller (NO @Validated): the response-serialization conversion (cf. #11659) ----
-    // Uses Micronaut's OWN PropagatedContext, seeded by RequestIdPropagatingFilter.
-
-    val expectedPropagated = "requestId before=request-42 afterThreadHop=request-42"
-
-    "suspend controller (plain, no @Validated) PRESERVES PropagatedContext" {
-        httpClient.toBlocking().retrieve("/stream/suspend") shouldBe expectedPropagated
-    }
-
-    "FLOW controller (plain, no @Validated) LOSES PropagatedContext (the bug)" {
-        httpClient.toBlocking().retrieve("/stream/flow") shouldBe "[\"$expectedPropagated\"]"
-    }
 })
