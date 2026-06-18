@@ -1,9 +1,18 @@
-# Micronaut 4 — `@Validated` `Flow` method loses coroutine context
+# Micronaut 4 — AOP-advised / controller `Flow` method loses coroutine context
 
-Minimal reproduction of a Micronaut 4 regression: a **`@Validated`** (AOP-advised) bean method that
-returns a Kotlin **`Flow`** loses the coroutine context (any `ThreadContextElement` — MDC,
-OpenTelemetry context, security/identity, and even Micronaut's own `PropagatedContext`) across a
-thread hop. The equivalent **`suspend`** method preserves it.
+Minimal reproduction of a Micronaut 4 regression: a bean method that returns a Kotlin **`Flow`**
+loses the coroutine context (any `ThreadContextElement` — MDC, OpenTelemetry context,
+security/identity, and even Micronaut's own `PropagatedContext`) across a thread hop. The equivalent
+**`suspend`** method preserves it.
+
+This is **not specific to `@Validated`** — it happens wherever a `Flow` return value crosses
+Micronaut's `Flow → Publisher` conversion. Two everyday surfaces hit it:
+
+- **Any AOP-advised bean** returning `Flow` — `@Validated`, `@Cacheable`, `@Transactional`, `@Retry`,
+  or any custom `@Around` advice. (This repro uses `@Validated`.)
+- **`@Controller` endpoints** returning `Flow` — the HTTP response path converts the `Flow` to a
+  `Publisher` to serialize it (the case in
+  [micronaut-core #11659](https://github.com/micronaut-projects/micronaut-core/issues/11659)).
 
 Built from [Micronaut Launch](https://micronaut.io/launch/) (Kotlin, Gradle KTS, Kotest), Micronaut
 **4.10.16**, Kotlin 1.9.25, kotlinx-coroutines, JDK 17.
@@ -46,6 +55,10 @@ open class GreetService {
 The caller installs the context with `withContext(RequestIdElement("request-42"))`. The `suspend`
 method sees `request-42` throughout; the `Flow` method sees `null` after the thread hop.
 
+[`GreetController`](src/main/kotlin/com/example/GreetController.kt) exercises the same two methods
+over HTTP, so the `Flow` failure reproduces through the full controller → bean request path as well,
+not just in a direct unit call.
+
 ## Root cause
 
 Micronaut's AOP `InterceptedMethodUtil.of(...)` classifies the return type:
@@ -80,23 +93,36 @@ a fresh/`Unconfined` context, and any subsequent dispatch/reactive resume runs w
 
 ## Impact
 
-Any AOP-advised (`@Validated`, `@Cacheable`, `@Transactional`, …) or controller/DGS method returning
-`Flow` silently loses MDC (log correlation), OpenTelemetry trace context, and any app/security
-context across the boundary.
+Any AOP-advised (`@Validated`, `@Cacheable`, `@Transactional`, …) bean or `@Controller`/DGS endpoint
+returning `Flow` silently loses MDC (log correlation), OpenTelemetry trace context, and any
+app/security context across the boundary.
 
 ## Possible fixes
-1. Route `Flow`-returning methods through the context-preserving path (as `suspend` /
-   `COMPLETION_STAGE`) instead of the reactive `Publisher` round-trip.
-2. Have the conversion participate in Reactor automatic context propagation so registered
-   `ThreadLocalAccessor`s (incl. `PropagatedContext`) are restored.
-3. At minimum, capture the calling coroutine context and pass it to `asPublisher(context)` (the
-   `TypeConverter` is not `suspend`, so the interception layer would need to supply it).
 
-### Included workaround
+The conversion drops the context, so any fix has to stop discarding it. In rough order of how
+generic they are:
+
+1. **Don't round-trip a `Flow` at all** (the Micronaut 3 behavior): treat a `Flow` return as
+   `SYNCHRONOUS` / hand it back untouched instead of `Flow → Publisher → Flow`. This is the *generic*
+   fix — it never touches the context, so **every** `ThreadContextElement` is preserved automatically.
+2. **Integrate the conversion with Reactor automatic context propagation**, so every registered
+   `ThreadLocalAccessor` (incl. `PropagatedContext`) is captured and restored at the boundary. Also
+   generic, but only for context types that have a registered accessor.
+3. **Capture the calling context and pass it to `asPublisher(context)`.** A real fix would do this at
+   the interception layer where the live `CoroutineContext` is available. Doing it in the
+   `TypeConverter` itself (as the workaround below does) is **not** generic — see why below.
+
+### Included workaround (deliberately non-generic — just to prove the cause)
 
 [`ContextPreservingFlowConverterRegistrar`](src/main/kotlin/com/example/ContextPreservingFlowConverterRegistrar.kt)
-is an application-side implementation of fix (3): it `@Replaces` the stock converter and snapshots
-the context-bearing `ThreadContextElement`s on the caller's thread, passing them to
-`asPublisher(context)`. It is **commented out** so `./gradlew test` reproduces the bug by default;
-**uncommenting its `@Singleton` + `@Replaces` annotations makes all four tests pass** (verified). It
-shows the bug is fixable purely by making the `Flow → Publisher` conversion context-aware.
+`@Replaces` the stock converter and passes a context into `asPublisher(context)`. It is **commented
+out** so `./gradlew test` reproduces the bug by default; **uncommenting its `@Singleton` +
+`@Replaces` annotations makes all four tests pass** (verified).
+
+It only proves the `Flow → Publisher` conversion is the culprit — it is **not** a real fix. A plain
+(non-`suspend`) `TypeConverter` cannot read the live `CoroutineContext`, so it can only rebuild a
+context from elements it explicitly knows how to read back from their own thread-locals (here just
+`RequestId`). There is no generic way to enumerate arbitrary active `ThreadContextElement`s, so a
+converter-level fix inevitably hard-codes a known set (MDC, OTel, security, …) and silently drops
+the rest. That limitation is exactly why fixes (1) and (2) — which never discard the context in the
+first place — are the right ones, and belong upstream.
