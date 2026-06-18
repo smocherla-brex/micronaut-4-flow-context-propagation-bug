@@ -136,13 +136,18 @@ generic they are:
 
 [`ContextPreservingFlowConverterRegistrar`](src/main/kotlin/com/example/ContextPreservingFlowConverterRegistrar.kt)
 `@Replaces` the stock converter and passes a context into `asPublisher(context)`. It is **commented
-out** so `./gradlew test` reproduces the bug by default; **uncommenting its `@Singleton` +
-`@Replaces` annotations makes all four tests pass** (verified).
+out** so `./gradlew test` reproduces the bug by default.
+
+Enabling it (uncommenting its `@Singleton` + `@Replaces` annotations) fixes only the cases it
+explicitly snapshots — the five `RequestId` tests pass, but **`FLOW controller (plain, no @Validated)
+LOSES PropagatedContext` still fails** (verified: `6 tests, 1 failed`). That residual failure *is*
+the genericity problem: the converter restores `RequestId` because it was coded to, and silently
+drops Micronaut's `PropagatedContext` because it wasn't.
 
 It only proves the `Flow → Publisher` conversion is the culprit — it is **not** a real fix. A plain
 (non-`suspend`) `TypeConverter` cannot read the live `CoroutineContext`, so it can only rebuild a
 context from elements it explicitly knows how to read back from their own thread-locals (here just
-`RequestId`). There is no generic way to enumerate arbitrary active `ThreadContextElement`s, so a
-converter-level fix inevitably hard-codes a known set (MDC, OTel, security, …) and silently drops
-the rest. That limitation is exactly why fixes (1) and (2) — which never discard the context in the
-first place — are the right ones, and belong upstream.
+`RequestId`). There is no generic way to enumerate arbitrary active context, so a converter-level fix
+inevitably hard-codes a known set (MDC, OTel, security, …) and silently drops the rest. That
+limitation is exactly why fixes (1) and (2) — which never discard the context in the first place —
+are the right ones, and belong upstream.

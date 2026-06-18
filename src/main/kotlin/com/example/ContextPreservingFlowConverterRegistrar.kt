@@ -31,9 +31,11 @@ import org.reactivestreams.Publisher
  * `Publisher` at all (the Micronaut 3 behavior), or integrate the conversion with Reactor automatic
  * context propagation so every registered `ThreadLocalAccessor` is restored.
  *
- * With this bean enabled, all four tests in FlowContextPropagationTest pass (the single element this
- * app cares about, [RequestId], survives). Confirmed: uncommenting the two annotations below turns
- * `./gradlew test` from 2 failures to all-green.
+ * Enabling this bean fixes only the cases whose context element it explicitly snapshots: the five
+ * `RequestId` tests go green, but `FLOW controller (plain, no @Validated) LOSES PropagatedContext`
+ * **still fails** — the converter knows nothing about Micronaut's `PropagatedContext`. That residual
+ * failure is the genericity problem in action: a converter-level fix only restores what it was told
+ * to capture.
  *
  * Left commented out so the default `./gradlew test` still demonstrates the bug. Enable it by
  * uncommenting the @Singleton + @Replaces annotations below.
