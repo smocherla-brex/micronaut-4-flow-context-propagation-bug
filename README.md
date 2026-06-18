@@ -91,3 +91,12 @@ context across the boundary.
    `ThreadLocalAccessor`s (incl. `PropagatedContext`) are restored.
 3. At minimum, capture the calling coroutine context and pass it to `asPublisher(context)` (the
    `TypeConverter` is not `suspend`, so the interception layer would need to supply it).
+
+### Included workaround
+
+[`ContextPreservingFlowConverterRegistrar`](src/main/kotlin/com/example/ContextPreservingFlowConverterRegistrar.kt)
+is an application-side implementation of fix (3): it `@Replaces` the stock converter and snapshots
+the context-bearing `ThreadContextElement`s on the caller's thread, passing them to
+`asPublisher(context)`. It is **commented out** so `./gradlew test` reproduces the bug by default;
+**uncommenting its `@Singleton` + `@Replaces` annotations makes all four tests pass** (verified). It
+shows the bug is fixable purely by making the `Flow → Publisher` conversion context-aware.
