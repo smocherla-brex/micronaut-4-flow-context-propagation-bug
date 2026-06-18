@@ -31,10 +31,16 @@ Result:
 | `FLOW service method LOSES the request context (the bug)` | ❌ **fail** |
 | `suspend controller endpoint PRESERVES the request context` | ✅ pass |
 | `FLOW controller endpoint LOSES the request context (the bug)` | ❌ **fail** |
+| `suspend controller (plain, no @Validated) PRESERVES PropagatedContext` | ✅ pass |
+| `FLOW controller (plain, no @Validated) LOSES PropagatedContext (the bug)` | ❌ **fail** |
 
 The `Flow` cases observe `afterThreadHop=null`: the context is present at the start of the flow but
 is lost across the `withContext(Dispatchers.IO)` thread hop. The `suspend` cases keep `request-42`
 throughout.
+
+This reproduces at **both** conversion sites (see [Root cause](#root-cause)): the AOP boundary
+(`@Validated`) and the controller's HTTP response serialization (a plain `@Controller`, no
+`@Validated`).
 
 ## What it shows
 
@@ -58,6 +64,20 @@ method sees `request-42` throughout; the `Flow` method sees `null` after the thr
 [`GreetController`](src/main/kotlin/com/example/GreetController.kt) exercises the same two methods
 over HTTP, so the `Flow` failure reproduces through the full controller → bean request path as well,
 not just in a direct unit call.
+
+### Second site: a plain `@Controller` returning `Flow` (no `@Validated`)
+
+[`StreamController`](src/main/kotlin/com/example/StreamController.kt) has **no `@Validated` and no
+AOP advice**. Its non-`suspend` `@Get fun flow(): Flow<String>` triggers the *same* conversion from a
+different direction: to serialize the response, Micronaut converts the returned `Flow → Publisher`
+through the same context-less `FlowPublisherConverterRegistrar`.
+
+Here the context is Micronaut's **own** [`PropagatedContext`](src/main/kotlin/com/example/PropagatedRequestId.kt)
+(seeded per-request by a `@ServerFilter`), so this is the framework losing *its own* propagated
+context across the thread hop — exactly
+[micronaut-core #11659](https://github.com/micronaut-projects/micronaut-core/issues/11659). The
+`suspend` endpoint keeps it (`before=request-42 afterThreadHop=request-42`); the non-`suspend` `Flow`
+endpoint loses it (`before=request-42 afterThreadHop=null`).
 
 ## Root cause
 

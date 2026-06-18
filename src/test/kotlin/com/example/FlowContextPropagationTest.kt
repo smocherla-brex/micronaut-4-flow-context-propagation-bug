@@ -9,12 +9,16 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.withContext
 
 /**
- * Reproduces the Micronaut 4 regression: a `@Validated`, `Flow`-returning bean method loses the
- * kotlinx coroutine context (here a [RequestIdElement]) across a thread hop, while the equivalent
- * `suspend` method preserves it.
+ * Reproduces the Micronaut 4 regression: a non-`suspend`, `Flow`-returning method loses the
+ * coroutine/request context across a thread hop, while the equivalent `suspend` method preserves it.
  *
- * The two `suspend ...` tests PASS; the two `FLOW ...` tests FAIL on Micronaut 4 (observed value has
- * `requestId ... null`), which is the bug. See README.md for the root cause.
+ * It reproduces at both conversion sites:
+ *  - the AOP boundary — a `@Validated` [GreetService] (context = a kotlinx [RequestIdElement]); and
+ *  - the controller response serialization — a plain [StreamController] with no `@Validated`
+ *    (context = Micronaut's own `PropagatedContext`), i.e. micronaut-core#11659.
+ *
+ * The `suspend ...` tests PASS; the `FLOW ...` tests FAIL on Micronaut 4 (observed `afterThreadHop=null`),
+ * which is the bug. See README.md for the root cause.
  */
 @MicronautTest
 class FlowContextPropagationTest(
@@ -49,5 +53,18 @@ class FlowContextPropagationTest(
     "FLOW controller endpoint LOSES the request context (the bug)" {
         // The /flow endpoint returns a JSON array with a single element.
         httpClient.toBlocking().retrieve("/greet/flow?name=world") shouldBe "[\"$expected\"]"
+    }
+
+    // ---- Plain controller (NO @Validated): the response-serialization conversion (cf. #11659) ----
+    // Uses Micronaut's OWN PropagatedContext, seeded by RequestIdPropagatingFilter.
+
+    val expectedPropagated = "requestId before=request-42 afterThreadHop=request-42"
+
+    "suspend controller (plain, no @Validated) PRESERVES PropagatedContext" {
+        httpClient.toBlocking().retrieve("/stream/suspend") shouldBe expectedPropagated
+    }
+
+    "FLOW controller (plain, no @Validated) LOSES PropagatedContext (the bug)" {
+        httpClient.toBlocking().retrieve("/stream/flow") shouldBe "[\"$expectedPropagated\"]"
     }
 })
